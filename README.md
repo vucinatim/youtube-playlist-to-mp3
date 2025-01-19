@@ -2,6 +2,7 @@
 
 This web application lets you effortlessly download audio tracks from YouTube playlists as MP3 files. With a user-friendly interface, you can search, filter, and manage videos, supporting both batch processing and individual downloads. 🚀
 
+[![YouTube Playlist MP3 Downloader](https://raw.githubusercontent.com/vucinatim/youtube-playlist-to-mp3/refs/heads/main/public/preview.png)](https://youtube-playlist-to-mp3.vercel.app/)
 ---
 
 ## 🌟 Features
