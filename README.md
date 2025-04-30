@@ -3,6 +3,77 @@
 This web application lets you effortlessly download audio tracks from YouTube playlists as MP3 files. With a user-friendly interface, you can search, filter, and manage videos, supporting both batch processing and individual downloads. 🚀
 
 [![YouTube Playlist MP3 Downloader](https://raw.githubusercontent.com/vucinatim/youtube-playlist-to-mp3/refs/heads/main/public/preview.png)](https://youtube-playlist-to-mp3.vercel.app/)
+
+---
+
+## 🛠️ Setup
+
+### Prerequisites
+
+- 🖥️ Node.js and pnpm (or npm/yarn) installed.
+- 🐍 Python 3 installed (for the backend download server).
+
+### Installation
+
+1.  Clone the repository:
+    ```bash
+    git clone https://github.com/vucinatim/youtube-playlist-to-mp3.git
+    cd youtube-playlist-mp3-downloader
+    ```
+2.  Install frontend dependencies:
+    ```bash
+    pnpm install
+    ```
+3.  Install backend dependencies:
+    ```bash
+    # Make sure you are using the correct Python environment if you use tools like venv or conda
+    pip install -r requirements.txt
+    ```
+
+### Environment Variables
+
+-   Configure a `.env.local` file in the project root.
+-   Add your YouTube Data API v3 key:
+    ```
+    YOUTUBE_API_KEY=YOUR_API_KEY_HERE
+    ```
+    You can get an API key from the [Google Cloud Console](https://console.cloud.google.com/apis/credentials) by enabling the "YouTube Data API v3".
+
+### Running Locally
+
+This project uses a Next.js frontend and a separate Flask backend for handling downloads. You need to run **both** servers concurrently for local development.
+
+**Using the integrated script (Recommended):**
+
+Run the following command in your terminal. It uses `concurrently` (installed as a dev dependency) to start both servers:
+
+```bash
+pnpm dev
+```
+
+This will:
+
+-   Start the Next.js development server (usually on `http://localhost:3000`).
+-   Start the Flask backend server (usually on `http://localhost:5328`).
+
+Logs from both servers will be shown in the same terminal.
+
+**Running servers separately (Alternative):**
+
+If you prefer, you can run them in separate terminals:
+
+1.  **Terminal 1 (Flask Backend):**
+    ```bash
+    # Make sure your Python environment is active if needed (e.g., source .venv/bin/activate)
+    python backend/app.py
+    ```
+2.  **Terminal 2 (Next.js Frontend):**
+    ```bash
+    pnpm dev:next
+    ```
+
+Your application should now be running, typically at `http://localhost:3000`.
+
 ---
 
 ## 🌟 Features
@@ -84,32 +155,6 @@ This web application lets you effortlessly download audio tracks from YouTube pl
   - 🔧 `@ffmpeg/ffmpeg` for client-side video-to-audio conversion.
 - **Backend:** 
   - 🔙 Next.js API routes handle playlist fetching and video stream redirection.
-
----
-
-## 🛠️ Setup
-
-### Prerequisites
-- 🖥️ Node.js and npm installed.
-
-### Installation
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/vucinatim/youtube-playlist-to-mp3.git
-   cd youtube-playlist-mp3-downloader
-   ```
-2. Install dependencies:
-   ```bash
-   pnpm install
-   ```
-3. Start the development server:
-   ```bash
-   pnpm dev
-   ```
-
-### Environment Variables
-- Configure a `.env.local` file with any required API keys or settings.
-You will need YOUTUBE_API_KEY to fetch playlist videos which you can get from [here](https://developers.google.com/youtube/v3/getting-started).
 
 ---
 
