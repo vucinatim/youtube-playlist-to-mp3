@@ -95,7 +95,7 @@ This web application lets you effortlessly download audio tracks from YouTube pl
 ### Installation
 1. Clone the repository:
    ```bash
-   git clone https://github.com/your-repo/youtube-playlist-mp3-downloader.git
+   git clone https://github.com/vucinatim/youtube-playlist-to-mp3.git
    cd youtube-playlist-mp3-downloader
    ```
 2. Install dependencies:
