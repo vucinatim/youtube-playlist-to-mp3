@@ -1,0 +1,3 @@
+yt-dlp
+requests
+Flask 
