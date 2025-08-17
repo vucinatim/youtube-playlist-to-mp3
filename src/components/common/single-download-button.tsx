@@ -29,7 +29,10 @@ const SingleDownloadButton = ({ videoId, title }: LocalDownloadButtonProps) => {
       setStatus("downloading");
       setProgress(0); // Reset progress
 
-      const contentLength = Number(response.headers.get("Content-Length"));
+      const contentLengthHeader = response.headers.get("Content-Length");
+      const contentLength = contentLengthHeader
+        ? Number(contentLengthHeader)
+        : 0;
       let downloadedSize = 0;
 
       // Read response as stream and calculate download progress
@@ -45,14 +48,20 @@ const SingleDownloadButton = ({ videoId, title }: LocalDownloadButtonProps) => {
             console.log(
               `Downloaded ${downloadedSize} bytes of ${contentLength}`
             );
-            setProgress(downloadedSize / contentLength);
+            if (contentLength > 0) {
+              setProgress(downloadedSize / contentLength);
+            } else {
+              // Fallback: show an indeterminate style by mapping bytes to a capped percentage
+              const approx = Math.min(0.95, downloadedSize / (2 * 1024 * 1024));
+              setProgress(approx);
+            }
           }
           done = readerDone;
         }
       }
       setStatus("converting");
       setProgress(0); // Reset progress
-      const audioBlob = new Blob(chunks);
+      const audioBlob = new Blob(chunks as BlobPart[]);
 
       // Initialize FFmpeg
       if (!ffmpegRef.current) {
@@ -93,6 +102,7 @@ const SingleDownloadButton = ({ videoId, title }: LocalDownloadButtonProps) => {
       const mp3Data = await ffmpeg.readFile(outputFileName);
 
       // Create a Blob URL for the MP3 file
+      // @ts-expect-error - FileData is not assignable to BlobPart
       const mp3Blob = new Blob([mp3Data], { type: "audio/mpeg" });
       const mp3Url = URL.createObjectURL(mp3Blob);
 

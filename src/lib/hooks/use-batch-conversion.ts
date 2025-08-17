@@ -59,7 +59,10 @@ const useBatchConversion = (videos: Video[]) => {
           throw new Error(`Failed to fetch audio for video: ${video.title}`);
         }
 
-        const contentLength = Number(response.headers.get("Content-Length"));
+        const contentLengthHeader = response.headers.get("Content-Length");
+        const contentLength = contentLengthHeader
+          ? Number(contentLengthHeader)
+          : 0;
         let downloadedSize = 0;
 
         // Read response stream
@@ -74,15 +77,17 @@ const useBatchConversion = (videos: Video[]) => {
             downloadedSize += value.length;
 
             // Update download progress
-            useProgressStore
-              .getState()
-              .setProgress(videoId, downloadedSize / contentLength);
+            const ratio =
+              contentLength > 0
+                ? downloadedSize / contentLength
+                : Math.min(0.95, downloadedSize / (2 * 1024 * 1024));
+            useProgressStore.getState().setProgress(videoId, ratio);
           }
         }
 
         // Convert video
         useProgressStore.getState().setStatus(videoId, "converting");
-        const audioBlob = new Blob(chunks);
+        const audioBlob = new Blob(chunks as BlobPart[]);
         const inputFileName = `${video.title}.webm`;
         const outputFileName = `${video.title.replace(/[^\w\s]/gi, "")}.mp3`;
 
