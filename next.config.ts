@@ -21,6 +21,14 @@ const nextConfig: NextConfig = {
         // NOTE: Ensure the port (5328) matches the port in backend/app.py
         destination: "http://127.0.0.1:5328/download",
       },
+      {
+        source: "/api/youtube/batch-zip",
+        destination: "http://127.0.0.1:5328/batch-zip",
+      },
+      {
+        source: "/api/youtube/download-mp3",
+        destination: "http://127.0.0.1:5328/download-mp3",
+      },
       // Add other rewrites here if needed
     ];
   },

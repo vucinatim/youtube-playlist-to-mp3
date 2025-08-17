@@ -1,7 +1,5 @@
-import { FFmpeg } from "@ffmpeg/ffmpeg";
-import { toBlobURL } from "@ffmpeg/util";
 import { Loader2 } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { Button } from "../ui/button";
 
 interface LocalDownloadButtonProps {
@@ -12,7 +10,6 @@ interface LocalDownloadButtonProps {
 const SingleDownloadButton = ({ videoId, title }: LocalDownloadButtonProps) => {
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [progress, setProgress] = useState<number>(0); // Tracks overall progress
-  const ffmpegRef = useRef<FFmpeg | null>(null);
   const [status, setStatus] = useState<
     "init" | "fetching" | "downloading" | "converting" | "finished"
   >("init");
@@ -21,8 +18,10 @@ const SingleDownloadButton = ({ videoId, title }: LocalDownloadButtonProps) => {
     setStatus("fetching");
 
     try {
-      // Fetch the audio stream from your server
-      const response = await fetch(`/api/youtube/download?videoId=${videoId}`);
+      // Fetch the final MP3 stream from the server
+      const response = await fetch(
+        `/api/youtube/download-mp3?videoId=${videoId}`
+      );
       if (!response.ok) {
         throw new Error("Failed to fetch audio stream.");
       }
@@ -59,53 +58,9 @@ const SingleDownloadButton = ({ videoId, title }: LocalDownloadButtonProps) => {
           done = readerDone;
         }
       }
-      setStatus("converting");
-      setProgress(0); // Reset progress
-      const audioBlob = new Blob(chunks as BlobPart[]);
-
-      // Initialize FFmpeg
-      if (!ffmpegRef.current) {
-        ffmpegRef.current = new FFmpeg();
-        const baseURL = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd";
-        await ffmpegRef.current.load({
-          coreURL: await toBlobURL(
-            `${baseURL}/ffmpeg-core.js`,
-            "text/javascript"
-          ),
-          wasmURL: await toBlobURL(
-            `${baseURL}/ffmpeg-core.wasm`,
-            "application/wasm"
-          ),
-        });
-      }
-
-      const ffmpeg = ffmpegRef.current;
-
-      // Write input file
-      const inputFileName = "input.webm";
-      const outputFileName = "output.mp3";
-
-      await ffmpeg.writeFile(
-        inputFileName,
-        new Uint8Array(await audioBlob.arrayBuffer())
-      );
-
-      // Track conversion progress
-      ffmpeg.on("progress", ({ progress }) => {
-        setProgress(progress);
-      });
-
-      // Execute conversion
-      await ffmpeg.exec(["-i", inputFileName, outputFileName]);
-
-      // Read the output file
-      const mp3Data = await ffmpeg.readFile(outputFileName);
-
       // Create a Blob URL for the MP3 file
-      // @ts-expect-error - FileData is not assignable to BlobPart
-      const mp3Blob = new Blob([mp3Data], { type: "audio/mpeg" });
+      const mp3Blob = new Blob(chunks as BlobPart[], { type: "audio/mpeg" });
       const mp3Url = URL.createObjectURL(mp3Blob);
-
       setDownloadUrl(mp3Url);
     } catch (error) {
       console.error("Error during audio conversion:", error);

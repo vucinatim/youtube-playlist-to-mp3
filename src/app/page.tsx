@@ -31,8 +31,6 @@ export default function HomePage() {
   const [playlistUrl, setPlaylistUrl] = useState("");
   const params = useSearchParams();
 
-  console.log(params);
-
   const {
     data: videos,
     mutate: fetchVideos,

@@ -1,8 +1,15 @@
 import json
 import os
+import re
+import shutil
+import tempfile
+import zipfile
 import time  # Import time module
-import yt_dlp
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 import requests
+import yt_dlp
+import zipstream
 from flask import Flask, request, jsonify, Response, stream_with_context
 
 app = Flask(__name__)
@@ -21,9 +28,9 @@ def download_audio():
     print(f"[Flask] Received request for videoId: {video_id}")
 
     try:
-        # yt-dlp options
+        # yt-dlp options (extract info only; we'll pick a direct stream URL)
         ydl_opts = {
-            "format": "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio",
+            "format": "bestaudio/best",
             "quiet": True,
             # 'verbose': True,
         }
@@ -55,16 +62,17 @@ def download_audio():
                     return float(metric) if isinstance(metric, (int, float)) else 0.0
 
                 audio_formats.sort(key=get_sort_metric, reverse=True)
-                best_webm = next(
-                    (f for f in audio_formats if f.get("ext") == "webm"), None
-                )
                 best_m4a = next(
                     (f for f in audio_formats if f.get("ext") == "m4a"), None
                 )
-                metric_webm = get_sort_metric(best_webm) if best_webm else 0.0
+                best_webm = next(
+                    (f for f in audio_formats if f.get("ext") == "webm"), None
+                )
                 metric_m4a = get_sort_metric(best_m4a) if best_m4a else 0.0
-                if best_webm and best_m4a and abs(metric_webm - metric_m4a) < 10:
-                    chosen_format = best_webm
+                metric_webm = get_sort_metric(best_webm) if best_webm else 0.0
+                # Prefer m4a if qualities are close; webm is frequently throttled more
+                if best_m4a and best_webm and abs(metric_m4a - metric_webm) < 32:
+                    chosen_format = best_m4a
                 elif audio_formats:
                     chosen_format = audio_formats[0]
         else:
@@ -116,25 +124,28 @@ def download_audio():
         for k, v in headers_from_ydl.items():
             merged_headers.setdefault(k, v)
 
+        # Default to Range requests which often trigger faster CDN paths
+        merged_headers.setdefault("Range", "bytes=0-")
         req = requests.get(
             download_url,
             stream=True,
             headers=merged_headers,
             allow_redirects=True,
-            timeout=30,
+            timeout=120,
         )
-        # If YouTube responds with non-success, retry once with a Range header which often triggers a 200/206
+        # If YouTube responds with non-success, retry once without Range as fallback
         if req.status_code >= 400:
             print(
-                f"[Flask] First attempt failed: {req.status_code} {req.reason}. Retrying with Range header..."
+                f"[Flask] First attempt failed: {req.status_code} {req.reason}. Retrying without Range header..."
             )
-            merged_headers_with_range = {**merged_headers, "Range": "bytes=0-"}
+            merged_headers_no_range = dict(merged_headers)
+            merged_headers_no_range.pop("Range", None)
             req = requests.get(
                 download_url,
                 stream=True,
-                headers=merged_headers_with_range,
+                headers=merged_headers_no_range,
                 allow_redirects=True,
-                timeout=30,
+                timeout=120,
             )
         req.raise_for_status()
         t_after_request_headers = time.time()
@@ -151,7 +162,7 @@ def download_audio():
 
         def generate():
             bytes_yielded = 0
-            for chunk in req.iter_content(chunk_size=8192):
+            for chunk in req.iter_content(chunk_size=1024 * 1024):
                 bytes_yielded += len(chunk)
                 yield chunk
             t_after_stream = time.time()
@@ -220,6 +231,246 @@ def download_audio():
 @app.route("/")
 def root():
     return jsonify({"status": "Flask backend is running"})
+
+
+def sanitize_filename(name: str) -> str:
+    safe = re.sub(r"[\\/:*?\"<>|]+", " ", name).strip()
+    safe = re.sub(r"\s+", " ", safe)
+    if not safe:
+        return "audio"
+    return safe[:200]
+
+
+@app.route("/download-mp3", methods=["GET"])
+def download_mp3():
+    t_start = time.time()
+    video_id = request.args.get("videoId")
+    if not video_id:
+        return jsonify({"error": "Missing videoId parameter"}), 400
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    print(f"[Single] Start download-mp3 for {video_id}")
+
+    tmpdir = tempfile.mkdtemp(prefix="ytmp3_one_")
+    try:
+        # First, extract title for nicer filename
+        title = video_id
+        try:
+            with yt_dlp.YoutubeDL({"quiet": True}) as ydl:
+                info = ydl.extract_info(url, download=False)
+                raw_title = info.get("title") or video_id
+                title = sanitize_filename(raw_title)
+        except Exception as e:
+            print(f"[Single] Title extract failed, falling back to id: {e}")
+
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "quiet": True,
+            "noprogress": True,
+            "outtmpl": os.path.join(tmpdir, "%(id)s.%(ext)s"),
+            "paths": {"home": tmpdir},
+            "http_chunk_size": 5_000_000,
+            "retries": 3,
+            "fragment_retries": 10,
+            "postprocessors": [
+                {
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "0",
+                }
+            ],
+        }
+        if shutil.which("aria2c"):
+            ydl_opts["external_downloader"] = "aria2c"
+            ydl_opts["external_downloader_args"] = {
+                "http": ["-x16", "-k1M", "--summary-interval=5"],
+                "https": ["-x16", "-k1M", "--summary-interval=5"],
+            }
+
+        t_dl_start = time.time()
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+        # Find the mp3 path
+        mp3_path = os.path.join(tmpdir, f"{video_id}.mp3")
+        if not os.path.exists(mp3_path):
+            for root, _dirs, files in os.walk(tmpdir):
+                for f in files:
+                    if f.endswith(".mp3") and (video_id in f or f.startswith(video_id)):
+                        mp3_path = os.path.join(root, f)
+                        break
+        if not os.path.exists(mp3_path):
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            return jsonify({"error": "MP3 output not found after conversion"}), 500
+
+        size_bytes = os.path.getsize(mp3_path)
+        arcname = f"{title}.mp3"
+        print(
+            f"[Single] Downloaded and converted in {time.time() - t_dl_start:.1f}s; size={size_bytes} bytes"
+        )
+
+        def generate_file_stream():
+            try:
+                with open(mp3_path, "rb") as f:
+                    while True:
+                        chunk = f.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        yield chunk
+            finally:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+                print(
+                    f"[Single] Cleaned temp dir. Total time={time.time() - t_start:.1f}s"
+                )
+
+        response = Response(
+            stream_with_context(generate_file_stream()), mimetype="audio/mpeg"
+        )
+        response.headers["Content-Disposition"] = f'attachment; filename="{arcname}"'
+        response.headers["Content-Length"] = str(size_bytes)
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
+    except yt_dlp.utils.DownloadError as e:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        print(f"[Single] yt-dlp error: {e}")
+        return jsonify({"error": "yt-dlp download error"}), 500
+    except Exception as e:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        print(f"[Single] Generic error: {e}")
+        return jsonify({"error": f"An unexpected error occurred: {e}"}), 500
+
+
+@app.route("/batch-zip", methods=["POST"])
+def batch_zip():
+    t_batch_start = time.time()
+    try:
+        data = request.get_json(force=True) or {}
+        items = data.get("items")
+        if not items or not isinstance(items, list):
+            return jsonify({"error": "Body must include items: [{id, title}]"}), 400
+
+        # Normalize items
+        tasks = []
+        for item in items:
+            vid = (item.get("id") or "").strip()
+            title = (item.get("title") or vid or "audio").strip()
+            if not vid:
+                continue
+            tasks.append({"id": vid, "title": title})
+
+        if not tasks:
+            return jsonify({"error": "No valid items provided"}), 400
+
+        print(f"[Batch] Starting batch for {len(tasks)} items")
+
+        tmpdir = tempfile.mkdtemp(prefix="ytmp3_")
+        try:
+            mp3_files = []
+            # Configure yt-dlp options
+            # Base yt-dlp options
+            ydl_opts = {
+                "format": "bestaudio/best",
+                "quiet": True,
+                "noprogress": True,
+                "outtmpl": os.path.join(tmpdir, "%(id)s.%(ext)s"),
+                "paths": {"home": tmpdir},
+                "http_chunk_size": 5_000_000,
+                "retries": 3,
+                "fragment_retries": 10,
+                "postprocessors": [
+                    {
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "mp3",
+                        "preferredquality": "0",
+                    }
+                ],
+            }
+
+            # Enable aria2c only if available on system
+            if shutil.which("aria2c"):
+                ydl_opts["external_downloader"] = "aria2c"
+                ydl_opts["external_downloader_args"] = {
+                    "http": ["-x16", "-k1M", "--summary-interval=5"],
+                    "https": ["-x16", "-k1M", "--summary-interval=5"],
+                }
+
+            # Download and convert sequentially (safer for now; can parallelize later)
+            for idx, task in enumerate(tasks, start=1):
+                vid = task["id"]
+                title = task["title"]
+                url = f"https://www.youtube.com/watch?v={vid}"
+                print(f"[Batch] ({idx}/{len(tasks)}) Downloading: {title} [{vid}]")
+                t_one_start = time.time()
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        ydl.download([url])
+                    # After post-processing, file should be at <tmp>/<id>.mp3
+                    mp3_path = os.path.join(tmpdir, f"{vid}.mp3")
+                    if not os.path.exists(mp3_path):
+                        # Fallback: search for any mp3 produced
+                        for root, _dirs, files in os.walk(tmpdir):
+                            for f in files:
+                                if f.endswith(".mp3") and (
+                                    vid in f or f.startswith(vid)
+                                ):
+                                    mp3_path = os.path.join(root, f)
+                                    break
+                    if not os.path.exists(mp3_path):
+                        raise FileNotFoundError("MP3 output not found after conversion")
+
+                    arcname = sanitize_filename(title) + ".mp3"
+                    mp3_files.append((mp3_path, arcname))
+                    t_one_end = time.time()
+                    size_mb = os.path.getsize(mp3_path) / (1024 * 1024)
+                    print(
+                        f"[Batch] Done: {title} in {t_one_end - t_one_start:.1f}s ({size_mb:.2f} MB)"
+                    )
+                except Exception as e:
+                    t_one_end = time.time()
+                    print(
+                        f"[Batch] FAILED: {title} [{vid}] after {t_one_end - t_one_start:.1f}s -> {e}"
+                    )
+
+            if not mp3_files:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+                return jsonify(
+                    {"error": "No items could be processed. Try again or check logs."}
+                ), 400
+
+            # Prepare streaming ZIP
+            z = zipstream.ZipFile(mode="w", compression=zipfile.ZIP_DEFLATED)
+            for file_path, arcname in mp3_files:
+                print(f"[Batch] Adding to ZIP: {arcname}")
+                z.write(file_path, arcname)
+
+            def generate_zip_stream():
+                try:
+                    for chunk in z:
+                        yield chunk
+                finally:
+                    t_batch_end = time.time()
+                    print(
+                        f"[Batch] ZIP streaming completed in {t_batch_end - t_batch_start:.1f}s"
+                    )
+                    shutil.rmtree(tmpdir, ignore_errors=True)
+
+            response = Response(
+                stream_with_context(generate_zip_stream()),
+                mimetype="application/zip",
+            )
+            response.headers["Content-Disposition"] = (
+                'attachment; filename="playlist.mp3.zip"'
+            )
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+            return response
+        except Exception as e:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            raise e
+    except Exception as e:
+        print(f"[Batch] Generic error: {e}")
+        return jsonify({"error": f"Batch failed: {e}"}), 500
 
 
 if __name__ == "__main__":

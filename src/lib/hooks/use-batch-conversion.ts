@@ -1,15 +1,9 @@
 import { Video } from "@/app/page";
-import { FFmpeg } from "@ffmpeg/ffmpeg";
-import { toBlobURL } from "@ffmpeg/util";
-import JSZip from "jszip";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { useProgressStore } from "../stores/progress-store";
-
-const MAX_CONCURRENT_CONVERSIONS = 3; // Limit concurrent tasks to prevent excessive resource usage
 
 const useBatchConversion = (videos: Video[]) => {
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
-  const ffmpegRef = useRef<FFmpeg | null>(null);
   const [isConverting, setIsConverting] = useState(false);
   const progressState = useProgressStore((state) => state.progress);
 
@@ -18,128 +12,61 @@ const useBatchConversion = (videos: Video[]) => {
       return alert("Please select at least one video to download.");
     }
 
-    const zip = new JSZip();
     setIsConverting(true);
 
     try {
-      // Initialize FFmpeg instance
-      if (!ffmpegRef.current) {
-        ffmpegRef.current = new FFmpeg();
-        const baseURL = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd";
-        await ffmpegRef.current.load({
-          coreURL: await toBlobURL(
-            `${baseURL}/ffmpeg-core.js`,
-            "text/javascript"
-          ),
-          wasmURL: await toBlobURL(
-            `${baseURL}/ffmpeg-core.wasm`,
-            "application/wasm"
-          ),
-        });
+      // Initialize progress per video
+      videos.forEach((v) => {
+        useProgressStore.getState().startVideo(v.id, v.title);
+        useProgressStore.getState().setStatus(v.id, "fetching");
+      });
+
+      const response = await fetch(`/api/youtube/batch-zip`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          items: videos.map((v) => ({ id: v.id, title: v.title })),
+        }),
+      });
+
+      if (!response.ok) {
+        const msg = await response.text();
+        throw new Error(msg || "Batch request failed");
       }
 
-      const ffmpeg = ffmpegRef.current;
+      const total = Number(response.headers.get("Content-Length") || 0);
+      const chunks: Uint8Array[] = [];
+      let downloaded = 0;
 
-      // Helper to process a single video
-      const processVideo = async (videoId: string) => {
-        const video = videos.find((v) => v.id === videoId);
-        if (!video) return;
+      videos.forEach((v) =>
+        useProgressStore.getState().setStatus(v.id, "downloading")
+      );
 
-        console.log(`Processing video: ${video.title}`);
-
-        // Start processing
-        useProgressStore.getState().startVideo(videoId, video.title);
-
-        // Fetch video
-        useProgressStore.getState().setStatus(videoId, "fetching");
-        const response = await fetch(
-          `/api/youtube/download?videoId=${videoId}`
-        );
-        if (!response.ok) {
-          throw new Error(`Failed to fetch audio for video: ${video.title}`);
-        }
-
-        const contentLengthHeader = response.headers.get("Content-Length");
-        const contentLength = contentLengthHeader
-          ? Number(contentLengthHeader)
-          : 0;
-        let downloadedSize = 0;
-
-        // Read response stream
-        useProgressStore.getState().setStatus(videoId, "downloading");
-        const reader = response.body?.getReader();
-        const chunks: Uint8Array[] = [];
+      if (response.body) {
+        const reader = response.body.getReader();
         while (true) {
-          const { value, done } = (await reader?.read()) || {};
+          const { value, done } = await reader.read();
           if (done) break;
           if (value) {
             chunks.push(value);
-            downloadedSize += value.length;
-
-            // Update download progress
-            const ratio =
-              contentLength > 0
-                ? downloadedSize / contentLength
-                : Math.min(0.95, downloadedSize / (2 * 1024 * 1024));
-            useProgressStore.getState().setProgress(videoId, ratio);
+            downloaded += value.length;
+            const ratio = total > 0 ? downloaded / total : 0;
+            videos.forEach((v) =>
+              useProgressStore
+                .getState()
+                .setProgress(v.id, Math.min(0.99, ratio))
+            );
           }
         }
+      } else {
+        const blob = await response.blob();
+        chunks.push(new Uint8Array(await blob.arrayBuffer()));
+      }
 
-        // Convert video
-        useProgressStore.getState().setStatus(videoId, "converting");
-        const audioBlob = new Blob(chunks as BlobPart[]);
-        const inputFileName = `${video.title}.webm`;
-        const outputFileName = `${video.title.replace(/[^\w\s]/gi, "")}.mp3`;
-
-        // Write input file to FFmpeg virtual filesystem
-        await ffmpeg.writeFile(
-          inputFileName,
-          new Uint8Array(await audioBlob.arrayBuffer())
-        );
-
-        // Track FFmpeg progress
-        ffmpeg.on("progress", ({ progress }) => {
-          useProgressStore.getState().setProgress(videoId, progress);
-        });
-
-        // Convert to MP3
-        await ffmpeg.exec(["-i", inputFileName, outputFileName]);
-
-        // Read converted MP3
-        const mp3Data = await ffmpeg.readFile(outputFileName);
-
-        // Add to ZIP
-        zip.file(outputFileName, mp3Data);
-
-        // Clean up FFmpeg virtual filesystem
-        await ffmpeg.deleteFile(inputFileName);
-        await ffmpeg.deleteFile(outputFileName);
-
-        // Mark as completed
-        useProgressStore.getState().setStatus(videoId, "completed");
-      };
-
-      // Concurrent processing with a queue
-      const queue = videos.slice(); // Copy of the selected videos
-      const workers = Array.from(
-        { length: MAX_CONCURRENT_CONVERSIONS },
-        async () => {
-          while (queue.length > 0) {
-            const video = queue.shift(); // Take next video from the queue
-            if (video) {
-              await processVideo(video.id);
-            }
-          }
-        }
-      );
-
-      // Wait for all workers to finish
-      await Promise.all(workers);
-
-      // Generate ZIP file and trigger download
-      const zipBlob = await zip.generateAsync({ type: "blob" });
+      const zipBlob = new Blob(chunks as BlobPart[], {
+        type: "application/zip",
+      });
       const zipUrl = URL.createObjectURL(zipBlob);
-
       setDownloadUrl(zipUrl);
 
       const link = document.createElement("a");
@@ -149,21 +76,19 @@ const useBatchConversion = (videos: Video[]) => {
       link.click();
       document.body.removeChild(link);
 
-      alert("Batch download complete!");
+      videos.forEach((v) => {
+        useProgressStore.getState().setProgress(v.id, 1);
+        useProgressStore.getState().setStatus(v.id, "completed");
+      });
     } catch (error) {
-      console.error("Error during batch conversion:", error);
+      console.error("Error during server-side batch conversion:", error);
       alert("An error occurred during batch conversion. Please try again.");
     } finally {
       setIsConverting(false);
     }
   }, [videos]);
 
-  return {
-    handleBatchConversion,
-    isConverting,
-    downloadUrl,
-    progressState,
-  };
+  return { handleBatchConversion, isConverting, downloadUrl, progressState };
 };
 
 export default useBatchConversion;
