@@ -1,4 +1,3 @@
-import json
 import os
 import re
 import shutil
@@ -394,12 +393,12 @@ def batch_zip():
                     "https": ["-x16", "-k1M", "--summary-interval=5"],
                 }
 
-            # Download and convert sequentially (safer for now; can parallelize later)
-            for idx, task in enumerate(tasks, start=1):
+            # Download and convert in parallel using a thread pool
+            def download_convert_one(task):
                 vid = task["id"]
                 title = task["title"]
                 url = f"https://www.youtube.com/watch?v={vid}"
-                print(f"[Batch] ({idx}/{len(tasks)}) Downloading: {title} [{vid}]")
+                print(f"[Batch] Downloading: {title} [{vid}]")
                 t_one_start = time.time()
                 try:
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -419,17 +418,40 @@ def batch_zip():
                         raise FileNotFoundError("MP3 output not found after conversion")
 
                     arcname = sanitize_filename(title) + ".mp3"
-                    mp3_files.append((mp3_path, arcname))
                     t_one_end = time.time()
                     size_mb = os.path.getsize(mp3_path) / (1024 * 1024)
                     print(
                         f"[Batch] Done: {title} in {t_one_end - t_one_start:.1f}s ({size_mb:.2f} MB)"
                     )
+                    return (mp3_path, arcname)
                 except Exception as e:
                     t_one_end = time.time()
                     print(
                         f"[Batch] FAILED: {title} [{vid}] after {t_one_end - t_one_start:.1f}s -> {e}"
                     )
+                    return None
+
+            # Determine worker count: request body > env var > default
+            max_workers_env = int(os.environ.get("YTMP3_MAX_WORKERS", "4"))
+            max_workers_req_raw = data.get("maxWorkers")
+            try:
+                max_workers_req = int(max_workers_req_raw)
+            except Exception:
+                max_workers_req = 0
+            requested_workers = (
+                max_workers_req if max_workers_req > 0 else max_workers_env
+            )
+            max_workers = max(1, min(requested_workers, 8, len(tasks)))
+            print(f"[Batch] Using up to {max_workers} parallel workers")
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_task = {
+                    executor.submit(download_convert_one, task): task for task in tasks
+                }
+                for future in as_completed(future_to_task):
+                    result = future.result()
+                    if result:
+                        mp3_files.append(result)
 
             if not mp3_files:
                 shutil.rmtree(tmpdir, ignore_errors=True)

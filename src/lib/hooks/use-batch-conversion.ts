@@ -21,11 +21,20 @@ const useBatchConversion = (videos: Video[]) => {
         useProgressStore.getState().setStatus(v.id, "fetching");
       });
 
+      // Determine a reasonable parallelism level for the backend
+      const hw =
+        typeof navigator !== "undefined" && navigator.hardwareConcurrency
+          ? navigator.hardwareConcurrency
+          : 4;
+      const suggestedWorkers = Math.max(1, Math.floor(hw / 2));
+      const maxWorkers = Math.min(8, suggestedWorkers, videos.length);
+
       const response = await fetch(`/api/youtube/batch-zip`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           items: videos.map((v) => ({ id: v.id, title: v.title })),
+          maxWorkers,
         }),
       });
 
