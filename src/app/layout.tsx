@@ -4,6 +4,7 @@ import "./globals.css";
 import { ReactQueryProvider } from "@/lib/providers/react-query-provider";
 import { Suspense } from "react";
 import { Loader2 } from "lucide-react";
+import Navbar from "@/components/common/navbar";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -38,6 +39,7 @@ export default function RootLayout({
               </div>
             }
           >
+            <Navbar />
             {children}
           </Suspense>
         </ReactQueryProvider>

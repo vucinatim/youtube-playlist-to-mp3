@@ -5,6 +5,8 @@ import { Ban, Eye, Pause, Play } from "lucide-react";
 import { Checkbox } from "../ui/checkbox";
 import Image from "next/image";
 import SingleDownloadButton from "./single-download-button";
+import { useEffect, useMemo, useState } from "react";
+import { useKeyStore } from "@/lib/stores/key-store";
 
 interface VideoCardProps {
   video: Video;
@@ -21,6 +23,12 @@ const VideoCard = ({
   onToggleSelection,
   onTogglePlayVideo,
 }: VideoCardProps) => {
+  const keyResult = useKeyStore((s) => s.keys[video.id]);
+  const overlayText = useMemo(() => {
+    if (!keyResult) return "Detecting…";
+    if ("key" in keyResult) return keyResult.key;
+    return "Key: —";
+  }, [keyResult]);
   const renderPlaySection = () => {
     return (
       <div className="flex flex-col sm:flex-row sm:items-center gap-4">
@@ -71,6 +79,9 @@ const VideoCard = ({
               <Ban size={24} />
             </div>
           )}
+          <div className="absolute top-1 left-1 px-2 py-0.5 rounded bg-black/70 text-[10px] leading-none">
+            {overlayText}
+          </div>
         </div>
         <div className="sm:hidden">{renderPlaySection()}</div>
       </div>

@@ -2,3 +2,7 @@ yt-dlp
 requests
 Flask
 zipstream
+librosa
+numpy
+scipy
+soundfile

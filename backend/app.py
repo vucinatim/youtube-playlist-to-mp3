@@ -5,13 +5,108 @@ import tempfile
 import zipfile
 import time  # Import time module
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 import requests
 import yt_dlp
 import zipstream
-from flask import Flask, request, jsonify, Response, stream_with_context
+from flask import Flask, request, jsonify, Response, stream_with_context, g
+
+# Optional heavy imports for key detection (loaded lazily in the endpoint)
+import subprocess
+import json as _json
+import sqlite3
+from pathlib import Path
 
 app = Flask(__name__)
+
+
+# --------------------
+# SQLite Initialization
+# --------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+MP3_DIR = os.path.join(DATA_DIR, "mp3")
+DB_PATH = os.path.join(DATA_DIR, "app.db")
+
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(MP3_DIR, exist_ok=True)
+
+
+def get_db():
+    if "db" not in g:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        g.db = conn
+    return g.db
+
+
+@app.teardown_appcontext
+def close_db(exception):
+    db = g.pop("db", None)
+    if db is not None:
+        db.close()
+
+
+def init_db():
+    db = sqlite3.connect(DB_PATH)
+    try:
+        cur = db.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS playlists (
+              id TEXT PRIMARY KEY,
+              url TEXT,
+              title TEXT,
+              channel TEXT,
+              thumbnail TEXT,
+              video_count INTEGER,
+              created_at TEXT DEFAULT (datetime('now')),
+              updated_at TEXT DEFAULT (datetime('now'))
+            )
+            """
+        )
+        # Migration: ensure playlists table has a 'thumbnail' column
+        try:
+            cur.execute("PRAGMA table_info(playlists)")
+            cols = [row[1] for row in cur.fetchall()]
+            if "thumbnail" not in cols:
+                cur.execute("ALTER TABLE playlists ADD COLUMN thumbnail TEXT")
+        except Exception as e:
+            print(f"[DB] Migration check/add thumbnail failed: {e}")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS videos (
+              video_id TEXT PRIMARY KEY,
+              title TEXT,
+              creator TEXT,
+              views INTEGER,
+              thumbnail TEXT,
+              key TEXT,
+              mp3_path TEXT,
+              last_updated TEXT DEFAULT (datetime('now'))
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS playlist_items (
+              playlist_id TEXT,
+              video_id TEXT,
+              position INTEGER,
+              PRIMARY KEY (playlist_id, video_id)
+            )
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_playlist_items_pid ON playlist_items(playlist_id)"
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+init_db()
 
 
 # Define the route for downloading audio
@@ -238,6 +333,390 @@ def sanitize_filename(name: str) -> str:
     if not safe:
         return "audio"
     return safe[:200]
+
+
+# --------------------
+# Playlist persistence endpoints
+# --------------------
+
+
+@app.route("/playlists", methods=["GET"])
+def list_playlists():
+    db = get_db()
+    rows = db.execute(
+        "SELECT id, url, title, channel, thumbnail, video_count, created_at, updated_at FROM playlists ORDER BY created_at DESC"
+    ).fetchall()
+    return jsonify({"playlists": [dict(r) for r in rows]})
+
+
+@app.route("/playlists", methods=["POST"])
+def upsert_playlist():
+    data = request.get_json(silent=True) or {}
+    playlist_id = (data.get("id") or "").strip()
+    url = (data.get("url") or "").strip()
+    title = (data.get("title") or "").strip()
+    channel = (data.get("channel") or "").strip()
+    videos = data.get("videos") or []
+
+    if not playlist_id or not url:
+        return jsonify({"error": "id and url are required"}), 400
+
+    db = get_db()
+    db.execute(
+        """
+        INSERT INTO playlists(id, url, title, channel, video_count, created_at, updated_at)
+        VALUES(?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        ON CONFLICT(id) DO UPDATE SET
+          url=excluded.url,
+          title=excluded.title,
+          channel=excluded.channel,
+          video_count=excluded.video_count,
+          updated_at=datetime('now')
+        """,
+        (playlist_id, url, title, channel, len(videos)),
+    )
+    # Update thumbnail separately to avoid altering existing schema ordering
+    thumb = (data.get("thumbnail") or "").strip()
+    if thumb:
+        db.execute(
+            "UPDATE playlists SET thumbnail=?, updated_at=datetime('now') WHERE id=?",
+            (thumb, playlist_id),
+        )
+
+    for idx, v in enumerate(videos):
+        vid = (v.get("id") or "").strip()
+        if not vid:
+            continue
+        vtitle = (v.get("title") or "").strip()
+        vcreator = (v.get("creator") or "").strip()
+        vviews = int(v.get("views") or 0)
+        vthumb = (v.get("thumbnail") or "").strip()
+        vkey = v.get("key") or None
+        vmp3 = v.get("mp3_path") or None
+
+        db.execute(
+            """
+            INSERT INTO videos(video_id, title, creator, views, thumbnail, key, mp3_path, last_updated)
+            VALUES(?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(video_id) DO UPDATE SET
+              title=excluded.title,
+              creator=excluded.creator,
+              views=excluded.views,
+              thumbnail=excluded.thumbnail,
+              key=COALESCE(excluded.key, videos.key),
+              mp3_path=COALESCE(excluded.mp3_path, videos.mp3_path),
+              last_updated=datetime('now')
+            """,
+            (vid, vtitle, vcreator, vviews, vthumb, vkey, vmp3),
+        )
+        db.execute(
+            """
+            INSERT INTO playlist_items(playlist_id, video_id, position)
+            VALUES(?, ?, ?)
+            ON CONFLICT(playlist_id, video_id) DO UPDATE SET position=excluded.position
+            """,
+            (playlist_id, vid, idx),
+        )
+
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.route("/playlists/<playlist_id>", methods=["GET"])
+def get_playlist_with_videos(playlist_id: str):
+    db = get_db()
+    pl = db.execute(
+        "SELECT id, url, title, channel, thumbnail, video_count, created_at, updated_at FROM playlists WHERE id=?",
+        (playlist_id,),
+    ).fetchone()
+    if not pl:
+        return jsonify({"error": "not found"}), 404
+    items = db.execute(
+        """
+        SELECT v.video_id as id, v.title, v.creator, v.views, v.thumbnail, v.key, v.mp3_path, pi.position
+        FROM playlist_items pi
+        JOIN videos v ON v.video_id = pi.video_id
+        WHERE pi.playlist_id = ?
+        ORDER BY pi.position ASC
+        """,
+        (playlist_id,),
+    ).fetchall()
+    return jsonify(
+        {
+            "playlist": dict(pl),
+            "videos": [dict(r) for r in items],
+        }
+    )
+
+
+def _get_best_audio_info(video_url: str):
+    """Return (download_url, ext) for the bestaudio stream using yt_dlp without full download."""
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "quiet": True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info_dict = ydl.extract_info(video_url, download=False)
+    # Select final URL similar to logic in /download
+    file_ext = None
+    download_url = None
+    requested_formats = info_dict.get("requested_formats")
+    if requested_formats and isinstance(requested_formats, list):
+        audio_candidates = [
+            f for f in requested_formats if f and f.get("acodec") != "none"
+        ]
+        if audio_candidates:
+            chosen = sorted(
+                audio_candidates,
+                key=lambda f: (
+                    f.get("abr") or 0,
+                    f.get("asr") or 0,
+                    f.get("filesize") or 0,
+                ),
+                reverse=True,
+            )[0]
+            download_url = chosen.get("url")
+            file_ext = chosen.get("ext") or info_dict.get("ext") or "webm"
+    if not download_url:
+        fmts = info_dict.get("formats") or []
+        audio_fmts = [f for f in fmts if f and f.get("acodec") != "none"]
+        if audio_fmts:
+            chosen = sorted(
+                audio_fmts,
+                key=lambda f: (
+                    f.get("abr") or 0,
+                    f.get("asr") or 0,
+                    f.get("filesize") or 0,
+                ),
+                reverse=True,
+            )[0]
+            download_url = chosen.get("url")
+            file_ext = chosen.get("ext") or info_dict.get("ext") or "webm"
+    return download_url, file_ext or "webm"
+
+
+def _estimate_key_with_librosa(wav_path: str) -> str:
+    """Basic key estimation using chroma features and Krumhansl-Schmuckler profiles."""
+    import numpy as _np
+    import librosa as _librosa
+
+    # Use lower sample rate for speed
+    y, sr = _librosa.load(wav_path, sr=11025, mono=True)
+    if y.size == 0:
+        return "unknown"
+    # Use chroma_stft for speed
+    chroma = _librosa.feature.chroma_stft(y=y, sr=sr)
+    if chroma.size == 0:
+        return "unknown"
+    chroma_mean = chroma.mean(axis=1)
+    # Krumhansl-Kessler key profiles (major/minor)
+    major_profile = _np.array(
+        [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
+    )
+    minor_profile = _np.array(
+        [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
+    )
+
+    def best_key(profile: "_np.ndarray"):
+        scores = []
+        for i in range(12):
+            rotated = _np.roll(profile, i)
+            score = _np.corrcoef(chroma_mean, rotated)[0, 1]
+            scores.append(score)
+        best_index = int(_np.nanargmax(scores))
+        best_score = float(scores[best_index])
+        return best_index, best_score
+
+    maj_index, maj_score = best_key(major_profile)
+    min_index, min_score = best_key(minor_profile)
+
+    pitch_classes = [
+        "C",
+        "C#",
+        "D",
+        "D#",
+        "E",
+        "F",
+        "F#",
+        "G",
+        "G#",
+        "A",
+        "A#",
+        "B",
+    ]
+    if _np.isnan(maj_score) and _np.isnan(min_score):
+        return "unknown"
+    if maj_score >= min_score:
+        return f"{pitch_classes[maj_index]} major"
+    else:
+        return f"{pitch_classes[min_index]} minor"
+
+
+@app.route("/detect-key", methods=["GET"])
+def detect_key():
+    """
+    Detect musical key of a YouTube video's audio by sampling ~30 seconds via ffmpeg
+    and estimating with librosa. Returns JSON: {"key": "C major"}.
+    """
+    video_id = request.args.get("videoId")
+    if not video_id:
+        return jsonify({"error": "Missing videoId parameter"}), 400
+
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+    try:
+        # Get a direct audio URL
+        audio_url, _ext = _get_best_audio_info(video_url)
+        if not audio_url:
+            return jsonify({"error": "Unable to resolve audio URL"}), 502
+
+        tmpdir = tempfile.mkdtemp(prefix="yt_key_")
+        wav_path = os.path.join(tmpdir, f"{video_id}.wav")
+
+        # Use ffmpeg to grab the first 30 seconds and decode to wav for analysis
+        ffmpeg_bin = shutil.which("ffmpeg")
+        if not ffmpeg_bin:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            return jsonify({"error": "ffmpeg not found on server"}), 500
+
+        # Some CDNs need a User-Agent; pass via headers if necessary
+        ffmpeg_cmd = [
+            ffmpeg_bin,
+            "-y",
+            "-ss",
+            "5",  # skip first seconds to avoid intros
+            "-t",
+            "12",  # shorter window for faster analysis
+            "-loglevel",
+            "error",
+            "-i",
+            audio_url,
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "11025",
+            wav_path,
+        ]
+        subprocess.run(
+            ffmpeg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+
+        # Analyze
+        key_str = _estimate_key_with_librosa(wav_path)
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return jsonify({"key": key_str})
+    except subprocess.CalledProcessError:
+        return jsonify({"error": "Failed to sample audio via ffmpeg"}), 500
+    except Exception as e:
+        try:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
+        return jsonify({"error": str(e)}), 500
+
+
+# Simple in-memory cache for detected keys
+_key_cache_lock = Lock()
+_key_cache: dict[str, str] = {}
+
+
+def _detect_key_for_video_id(video_id: str) -> tuple[str, str | None]:
+    """Return (video_id, key or None). Uses cache to avoid recompute."""
+    with _key_cache_lock:
+        if video_id in _key_cache:
+            return video_id, _key_cache[video_id]
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+    try:
+        audio_url, _ext = _get_best_audio_info(video_url)
+        if not audio_url:
+            return video_id, None
+        tmpdir = tempfile.mkdtemp(prefix="yt_key_")
+        wav_path = os.path.join(tmpdir, f"{video_id}.wav")
+        ffmpeg_bin = shutil.which("ffmpeg")
+        if not ffmpeg_bin:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            return video_id, None
+        ffmpeg_cmd = [
+            ffmpeg_bin,
+            "-y",
+            "-ss",
+            "5",
+            "-t",
+            "12",
+            "-loglevel",
+            "error",
+            "-i",
+            audio_url,
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "11025",
+            wav_path,
+        ]
+        subprocess.run(
+            ffmpeg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        key_str = _estimate_key_with_librosa(wav_path)
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        with _key_cache_lock:
+            _key_cache[video_id] = key_str
+        return video_id, key_str
+    except Exception:
+        try:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
+        return video_id, None
+
+
+@app.route("/detect-keys", methods=["POST"])
+def detect_keys_batch():
+    """
+    Batch-detect keys. Body: {"ids": ["vid1", ...], "maxWorkers": optional}
+    Returns {"results": {"vid1": {"key": "C major"}, "vid2": {"error": "..."}}}
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        ids = data.get("ids") or []
+        if not isinstance(ids, list) or not all(isinstance(v, str) for v in ids):
+            return jsonify({"error": "ids must be a list of strings"}), 400
+        max_workers_req = int(data.get("maxWorkers") or 0)
+        max_workers_env = int(os.environ.get("YTMP3_MAX_WORKERS", "4"))
+        max_workers = max(1, min(8, max_workers_req or max_workers_env, len(ids) or 1))
+
+        results: dict[str, dict] = {}
+        if not ids:
+            return jsonify({"results": results})
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_id = {
+                executor.submit(_detect_key_for_video_id, vid): vid for vid in ids
+            }
+            for future in as_completed(future_to_id):
+                vid = future_to_id[future]
+                try:
+                    _vid, key = future.result()
+                    if key is not None:
+                        results[vid] = {"key": key}
+                        # Persist key to DB best-effort
+                        try:
+                            db = get_db()
+                            db.execute(
+                                "UPDATE videos SET key=?, last_updated=datetime('now') WHERE video_id=?",
+                                (key, vid),
+                            )
+                            db.commit()
+                        except Exception as e:
+                            print(f"[DB] failed to persist key for {vid}: {e}")
+                    else:
+                        results[vid] = {"error": "failed"}
+                except Exception as e:
+                    results[vid] = {"error": str(e)}
+
+        return jsonify({"results": results})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/download-mp3", methods=["GET"])

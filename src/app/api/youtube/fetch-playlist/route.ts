@@ -13,9 +13,11 @@ export interface GaxiosResponse<T = any> {
 
 export async function POST(request: Request) {
   const { url } = await request.json();
+  const cleanedUrl =
+    typeof url === "string" && url.startsWith("@") ? url.slice(1) : url;
 
   // Extract the playlist ID from the URL
-  const playlistIdMatch = url.match(/[&?]list=([a-zA-Z0-9_-]+)/);
+  const playlistIdMatch = cleanedUrl.match(/[&?]list=([a-zA-Z0-9_-]+)/);
   if (!playlistIdMatch) {
     return NextResponse.json(
       { error: "Invalid playlist URL" },
@@ -29,6 +31,24 @@ export async function POST(request: Request) {
       version: "v3",
       auth: process.env.YOUTUBE_API_KEY, // Use your API key from environment variables
     });
+
+    // Fetch playlist metadata
+    const playlistResp = (await youtube.playlists.list({
+      id: [playlistId],
+      part: ["snippet"],
+      maxResults: 1,
+    })) as GaxiosResponse<youtube_v3.Schema$PlaylistListResponse>;
+    const pItem = (playlistResp.data.items || [])[0];
+    const playlist = {
+      id: playlistId,
+      title: pItem?.snippet?.title || "",
+      channel: pItem?.snippet?.channelTitle || "",
+      thumbnail:
+        pItem?.snippet?.thumbnails?.default?.url ||
+        pItem?.snippet?.thumbnails?.medium?.url ||
+        pItem?.snippet?.thumbnails?.high?.url ||
+        "",
+    };
 
     let videos: {
       id: string;
@@ -76,7 +96,7 @@ export async function POST(request: Request) {
       nextPageToken = response.data.nextPageToken;
     } while (nextPageToken);
 
-    return NextResponse.json({ videos });
+    return NextResponse.json({ videos, playlist });
   } catch (error) {
     console.error("Error fetching playlist:", error);
     return NextResponse.json(
