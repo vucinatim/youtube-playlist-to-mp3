@@ -1,13 +1,18 @@
-import { Loader2 } from "lucide-react";
+import { Download, Loader2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Button } from "../ui/button";
 
 interface LocalDownloadButtonProps {
   videoId: string;
   title: string;
+  mp3_path?: string | null;
 }
 
-const SingleDownloadButton = ({ videoId, title }: LocalDownloadButtonProps) => {
+const SingleDownloadButton = ({
+  videoId,
+  title,
+  mp3_path,
+}: LocalDownloadButtonProps) => {
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [progress, setProgress] = useState<number>(0); // Tracks overall progress
   const [status, setStatus] = useState<
@@ -89,7 +94,7 @@ const SingleDownloadButton = ({ videoId, title }: LocalDownloadButtonProps) => {
   const getStatusDisplay = () => {
     switch (status) {
       case "init":
-        return "Convert to MP3";
+        return "Download";
       case "fetching":
         return <Loader2 className="h-4 w-4 animate-spin" />;
       case "downloading":
@@ -102,6 +107,20 @@ const SingleDownloadButton = ({ videoId, title }: LocalDownloadButtonProps) => {
         return "Unknown status";
     }
   };
+
+  // If the MP3 path is already provided, we can skip the conversion process.
+  if (mp3_path) {
+    return (
+      <Button asChild size="icon" variant="ghost">
+        <a
+          href={`/api/youtube/download-mp3?videoId=${videoId}`}
+          download={`${title.replace(/[^\w\s]/gi, "")}.mp3`}
+        >
+          <Download size={20} />
+        </a>
+      </Button>
+    );
+  }
 
   return (
     <Button

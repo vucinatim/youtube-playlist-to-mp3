@@ -16,10 +16,12 @@ import VideoCard from "@/components/common/video-card";
 import SkeletonVideoCard from "@/components/common/skeleton-video-card";
 import { useFilteredVideos } from "@/lib/hooks/use-filtered-videos";
 import { useVideoSelection } from "@/lib/hooks/use-video-selection";
-import { useFetchPlaylistVideos } from "@/lib/hooks/use-get-playlist-videos";
+import { useGetPlaylistVideos } from "@/lib/hooks/use-get-playlist-videos";
 import useBatchConversion from "@/lib/hooks/use-batch-conversion";
-import { useSearchParams } from "next/navigation";
+import { useSearchParams, useRouter } from "next/navigation";
 import PlaylistsPanel from "@/components/common/playlists-panel";
+import { useAnalysis } from "@/lib/hooks/use-analysis";
+import { useKeyboardShortcuts } from "@/lib/hooks/use-keyboard-shortcuts";
 
 export interface Video {
   id: string;
@@ -27,34 +29,37 @@ export interface Video {
   thumbnail: string;
   views: number; // Add views property
   creator: string; // Add creator/channel property
+  mp3_path?: string;
+  analysis?: {
+    key?: string;
+    bpm?: number;
+    energy?: number;
+    danceability?: number;
+    segments?: {
+      start: number;
+      end: number;
+      label: string;
+    }[];
+    cue_points?: { time: number; label: string }[];
+  };
 }
 
 export default function HomePage() {
   const [playlistUrl, setPlaylistUrl] = useState("");
   const params = useSearchParams();
+  const router = useRouter();
   const listId = params.get("list");
   const videoIdParam = params.get("v");
 
   const {
     data: playlistData,
-    mutate: fetchVideos,
-    isPending: fetching,
-  } = useFetchPlaylistVideos();
-
-  // Allow overriding data from DB when available for instant load
-  const [dbPlaylistData, setDbPlaylistData] = useState<{
-    videos: Video[];
-    playlist?: {
-      id: string;
-      title: string;
-      channel: string;
-      thumbnail: string;
-    };
-  } | null>(null);
+    isFetching: fetching,
+    isError,
+  } = useGetPlaylistVideos(listId);
 
   const videos = useMemo(() => {
-    return (dbPlaylistData ?? playlistData)?.videos;
-  }, [dbPlaylistData, playlistData]);
+    return playlistData?.videos;
+  }, [playlistData]);
 
   const [activeVideo, setActiveVideo] = useState<Video | null>(null); // Current video for sidebar player
 
@@ -72,63 +77,44 @@ export default function HomePage() {
   const { handleBatchConversion, isConverting, progressState } =
     useBatchConversion(selectedVideos);
 
+  const { mutate: analyze, isPending: isAnalyzing } = useAnalysis();
+  const handlePlayVideo = (video: Video) => {
+    setActiveVideo((curr) => (curr?.id === video.id ? null : video));
+  };
+
+  // Bind keyboard shortcuts for cue 1-4 on hovered track
+  useKeyboardShortcuts();
+
+  const handleFetchPlaylist = () => {
+    const cleaned = playlistUrl.startsWith("@")
+      ? playlistUrl.slice(1)
+      : playlistUrl;
+    const playlistIdMatch = cleaned.match(/[&?]list=([a-zA-Z0-9_-]+)/);
+    if (playlistIdMatch) {
+      router.push(`/?list=${playlistIdMatch[1]}`);
+    } else {
+      // TODO: Better error handling for invalid URLs
+      console.error("Invalid YouTube Playlist URL");
+    }
+  };
+
   useEffect(() => {
-    if (!listId) return;
-    const currentListId = listId;
-    const currentVideoId = videoIdParam || undefined;
-    const url = `https://www.youtube.com/playlist?list=${currentListId}`;
+    if (!listId) {
+      setPlaylistUrl("");
+      return;
+    }
+    const url = `https://www.youtube.com/playlist?list=${listId}`;
     setPlaylistUrl(url);
-    setDbPlaylistData(null);
 
-    let cancelled = false;
-    const tryLoadFromDb = async () => {
-      try {
-        const res = await fetch(
-          `/api/youtube/playlists/${encodeURIComponent(currentListId)}`,
-          { cache: "no-store" }
-        );
-        if (cancelled) return;
-        if (res.ok) {
-          const data = await res.json();
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const vids: Video[] = (data?.videos || []).map((v: any) => ({
-            id: v.id,
-            title: v.title,
-            thumbnail: v.thumbnail,
-            views: Number(v.views || 0),
-            creator: v.creator || "",
-          }));
-          setDbPlaylistData({ videos: vids, playlist: data?.playlist });
-          if (currentVideoId) {
-            const found = vids.find((v) => v.id === currentVideoId);
-            if (found) setActiveVideo(found);
-          }
-          return;
-        }
-      } catch {
-        // fall through to network fetch
-      }
+    if (videoIdParam && videos) {
+      const found = videos.find((v) => v.id === videoIdParam);
+      if (found) setActiveVideo(found);
+    }
+  }, [listId, videoIdParam, videos]);
 
-      // Fallback to network fetch via YouTube API
-      fetchVideos(url, {
-        onSuccess: (payload: { videos: Video[] }) => {
-          if (cancelled) return;
-          if (currentVideoId) {
-            const found = payload.videos.find(
-              (v: Video) => v.id === currentVideoId
-            );
-            if (found) setActiveVideo(found);
-          }
-        },
-      } as { onSuccess: (payload: { videos: Video[] }) => void });
-    };
-
-    tryLoadFromDb();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [listId, videoIdParam]);
+  if (isError) {
+    return <div>Error loading playlist</div>;
+  }
 
   return (
     <div className="relative flex flex-col mx-auto p-6">
@@ -141,10 +127,13 @@ export default function HomePage() {
               value={playlistUrl}
               onChange={(e) => setPlaylistUrl(e.target.value)}
               className="grow"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") handleFetchPlaylist();
+              }}
             />
             <Button
               variant={videos ? "outline" : "default"}
-              onClick={() => fetchVideos(playlistUrl)}
+              onClick={handleFetchPlaylist}
               disabled={fetching}
             >
               {fetching && <Loader2 className="h-4 w-4 animate-spin" />}
@@ -229,6 +218,34 @@ export default function HomePage() {
                   {selectedVideos.length > 0 ? `Deselect All` : "Select All"}
                 </Button>
                 <Button
+                  onClick={() => {
+                    const downloadedVideos = selectedVideos.filter(
+                      (v) => v.mp3_path
+                    );
+                    if (downloadedVideos.length > 0) {
+                      analyze({
+                        ids: downloadedVideos.map((v) => v.id),
+                      });
+                    }
+                  }}
+                  disabled={
+                    !videos ||
+                    videos.length === 0 ||
+                    isAnalyzing ||
+                    selectedVideos.length === 0 ||
+                    selectedVideos.every((v) => !v.mp3_path)
+                  }
+                  className="grow"
+                >
+                  {isAnalyzing
+                    ? "Analyzing..."
+                    : selectedVideos.length > 0
+                    ? `Analyze ${selectedVideos.length}`
+                    : "Analyze"}
+                </Button>
+              </div>
+              <div className="flex gap-2">
+                <Button
                   onClick={handleBatchConversion}
                   disabled={
                     !videos ||
@@ -285,17 +302,10 @@ export default function HomePage() {
                     key={video.id}
                     video={video}
                     isSelected={selectedVideos.includes(video)}
-                    isPlaying={activeVideo?.id === video.id}
                     onToggleSelection={() => toggleSelection(video)}
-                    onTogglePlayVideo={(video) =>
-                      setActiveVideo((currentVideo) => {
-                        if (video.id === currentVideo?.id) {
-                          return null;
-                        } else {
-                          return video;
-                        }
-                      })
-                    }
+                    onAnalyze={(videoId) => analyze({ ids: [videoId] })}
+                    onPlayVideo={handlePlayVideo}
+                    isActive={activeVideo?.id === video.id}
                   />
                 ))}
               </div>

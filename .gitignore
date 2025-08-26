@@ -2,6 +2,7 @@
 
 # local db
 *.db
+*.mp3
 
 # dependencies
 /node_modules
