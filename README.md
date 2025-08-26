@@ -1,3 +1,27 @@
+# Desktop Dev (Electron)
+
+Quick-start dev for the desktop app (runs Next + Flask + Electron together):
+
+1. Install dependencies
+   - Node: pnpm i
+   - Python: pip install -r requirements.txt
+   - ffmpeg: ensure ffmpeg is installed on PATH (brew install ffmpeg on macOS)
+2. Run all processes together
+
+```
+pnpm dev:desktop
+```
+
+This will start:
+- Next on http://localhost:3000
+- Flask on http://127.0.0.1:5328
+- Electron pointing to http://localhost:3000
+
+Production bundling (WIP):
+- Package Flask with PyInstaller per OS and bundle ffmpeg binaries.
+- Use electron-builder to create installers and include sidecars in extraResources.
+- Configure app data path for SQLite under the per-user directory.
+
 # 🎶 YouTube Playlist MP3 Downloader 🎵
 
 This web application lets you effortlessly download audio tracks from YouTube playlists as MP3 files. With a user-friendly interface, you can search, filter, and manage videos, supporting both batch processing and individual downloads. 🚀

@@ -42,3 +42,21 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# electron build outputs
+/dist/
+/electron/dist/
+
+# packaged installers
+*.dmg
+*.exe
+*.msi
+*.AppImage
+*.deb
+*.zip
+
+# PyInstaller / backend sidecars (to be generated later)
+/backend/dist/
+/backend/build/
+/backend/__pycache__/
+**/__pycache__/

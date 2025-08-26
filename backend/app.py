@@ -14,9 +14,7 @@ from flask import Flask, request, jsonify, Response, stream_with_context, g
 
 # Optional heavy imports for key detection (loaded lazily in the endpoint)
 import subprocess
-import json as _json
 import sqlite3
-from pathlib import Path
 
 app = Flask(__name__)
 
@@ -25,7 +23,8 @@ app = Flask(__name__)
 # SQLite Initialization
 # --------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "data")
+# Allow overriding data dir when packaged (Electron/Tauri)
+DATA_DIR = os.environ.get("APP_DATA_DIR", os.path.join(BASE_DIR, "data"))
 MP3_DIR = os.path.join(DATA_DIR, "mp3")
 DB_PATH = os.path.join(DATA_DIR, "app.db")
 

@@ -5,7 +5,7 @@ import { Ban, Eye, Pause, Play } from "lucide-react";
 import { Checkbox } from "../ui/checkbox";
 import Image from "next/image";
 import SingleDownloadButton from "./single-download-button";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useKeyStore } from "@/lib/stores/key-store";
 
 interface VideoCardProps {

@@ -14,7 +14,7 @@ export async function GET() {
     const text = await upstream.text();
     const data = JSON.parse(text);
     return NextResponse.json(data, { status: upstream.status });
-  } catch (err: any) {
+  } catch {
     return NextResponse.json(
       { error: "Failed to proxy playlists" },
       { status: 500 }
@@ -35,7 +35,7 @@ export async function POST(request: Request) {
     const text = await upstream.text();
     const data = JSON.parse(text);
     return NextResponse.json(data, { status: upstream.status });
-  } catch (err: any) {
+  } catch {
     return NextResponse.json(
       { error: "Failed to proxy save playlist" },
       { status: 500 }
